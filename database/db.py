@@ -33,9 +33,13 @@ class Database:
         return c
 
     def add_ids(self, ids):
+        unique = list(dict.fromkeys(str(x) for x in ids if x))
         with self.connect() as c:
+            before = c.total_changes
             c.executemany("INSERT OR IGNORE INTO sellers(seller_id, discovered_at) VALUES (?,?)",
-                          [(str(x), now()) for x in ids if x])
+                          [(x, now()) for x in unique])
+            added = c.total_changes - before
+        return added, len(unique) - added
 
     def pending_ids(self):
         with self.connect() as c:

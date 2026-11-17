@@ -40,20 +40,21 @@ except Exception:
 
 st.subheader("1. Discover sellers")
 st.caption("Cost: ~10 tokens + 1 per 100 IDs (Keepa returns at least 50 per request).")
-d1, d2, d3 = st.columns(3)
+d1, d2, d3, d4 = st.columns(4)
 sample = d1.number_input("Seller IDs to store", 1, 10000, 100)
 min_rating = d2.number_input("Min feedback (0 = brand-new sellers)", 0, 49, 0)
 max_rating = d3.number_input("Max feedback", 0, 49, 49)
+page = d4.number_input("Result page (increment on next search)", 0, 199, 0)
 sort = st.selectbox("Order", list(SORTS))
 us_only = st.checkbox("US business address only (addressCountry = US)", value=True)
 if st.button("Discover seller IDs", type="primary"):
     api = KeepaClient(cfg.api_key, cfg.domain)
     try:
         with st.spinner("Querying Keepa Seller Finder..."):
-            ids, total = discover(api, int(sample), int(min_rating), int(max_rating), sort, us_only=us_only)
-            db.add_ids(ids[:int(sample)])
-        st.success(f"Stored {len(ids[:int(sample)])} IDs. Provider-reported total: {total}.")
-        st.info("This starter retrieves page 0 only. Validate pagination and category coverage before a full run.")
+            ids, total = discover(api, int(sample), int(min_rating), int(max_rating), sort,
+                                  us_only=us_only, page=int(page))
+            added, skipped = db.add_ids(ids[:int(sample)])
+        st.success(f"Added {added} new seller IDs ({skipped} duplicates skipped). Provider-reported total: {total}.")
     except Exception as exc:
         logger.exception("Discovery failed")
         st.error(str(exc))
