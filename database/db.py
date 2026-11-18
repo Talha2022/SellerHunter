@@ -80,20 +80,29 @@ class Database:
         with self.connect() as c:
             c.executemany(sql, [[r.get(k) for k in keys] for r in rows])
 
-    def existing_brands(self):
+    def existing_brands(self, min_fba=1, min_sales=0, min_price=0.0, max_price=10000.0):
         with self.connect() as c:
             rows = c.execute(
                 "SELECT DISTINCT LOWER(TRIM(brand)) AS b FROM products "
-                "WHERE sold_by_amazon = 0 AND brand IS NOT NULL AND TRIM(brand) <> ''"
+                "WHERE sold_by_amazon = 0 AND brand IS NOT NULL AND TRIM(brand) <> '' "
+                "AND fba_sellers IS NOT NULL AND fba_sellers >= ? "
+                "AND (? <= 0 OR (monthly_sold IS NOT NULL AND monthly_sold >= ?)) "
+                "AND price IS NOT NULL AND price BETWEEN ? AND ?",
+                (int(min_fba), int(min_sales), int(min_sales), float(min_price), float(max_price)),
             ).fetchall()
             return {r["b"] for r in rows}
 
-    def product_rows(self, unique_brands=True):
+    def product_rows(self, unique_brands=True, min_fba=1, min_sales=0, min_price=0.0, max_price=10000.0):
         sql = ("SELECT p.*, s.seller_name FROM products p "
                "LEFT JOIN sellers s ON s.seller_id = p.seller_id "
-               "WHERE p.sold_by_amazon = 0 ORDER BY p.fetched_at, p.seller_id, p.asin")
+               "WHERE p.sold_by_amazon = 0 "
+               "AND p.fba_sellers IS NOT NULL AND p.fba_sellers >= ? "
+               "AND (? <= 0 OR (p.monthly_sold IS NOT NULL AND p.monthly_sold >= ?)) "
+               "AND p.price IS NOT NULL AND p.price BETWEEN ? AND ? "
+               "ORDER BY p.fetched_at, p.seller_id, p.asin")
+        params = (int(min_fba), int(min_sales), int(min_sales), float(min_price), float(max_price))
         with self.connect() as c:
-            rows = [dict(r) for r in c.execute(sql).fetchall()]
+            rows = [dict(r) for r in c.execute(sql, params).fetchall()]
         if not unique_brands:
             return rows
         seen, kept = set(), []

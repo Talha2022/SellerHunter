@@ -63,10 +63,10 @@ def extract_product(product, seller_id):
 def filter_reason(row, min_fba=1, min_monthly_sales=0, min_price=0.0, max_price=10000.0):
     if row["sold_by_amazon"]:
         return "Rejected: sold by Amazon"
-    # Keepa leaves offerCountFBA as -2 (None) unless offers=20 (+6 tokens/ASIN) is requested; fall back to total_offers
-    seller_count = row["fba_sellers"] if row["fba_sellers"] is not None else row.get("total_offers")
-    if seller_count is None or seller_count < min_fba:
-        return f"Rejected: FBA={row['fba_sellers']}, total={row.get('total_offers')} (< {min_fba})"
+    if row["fba_sellers"] is None:
+        return "Rejected: FBA seller count unavailable (keep exact FBA enabled)"
+    if row["fba_sellers"] < min_fba:
+        return f"Rejected: FBA sellers ({row['fba_sellers']}) < {min_fba}"
     if min_monthly_sales > 0 and (row["monthly_sold"] is None or row["monthly_sold"] < min_monthly_sales):
         return f"Rejected: past-month sales ({row['monthly_sold']}) < {min_monthly_sales}"
     if row["price"] is None or not (min_price <= row["price"] <= max_price):

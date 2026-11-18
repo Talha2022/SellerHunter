@@ -2,6 +2,8 @@ import html
 import importlib
 import streamlit as st
 from config import get_settings
+import database.db as _db
+importlib.reload(_db)
 from database.db import Database
 import services.keepa_client as _keepa_client
 importlib.reload(_keepa_client)
@@ -151,27 +153,27 @@ else:
     st.info("No verified qualifying sellers yet.")
 
 st.subheader("4. Seller active listings & product filter")
-st.caption("Cost: ~10 tokens per seller storefront + 1 token per ASIN checked. Products sold by Amazon are rejected.")
+st.caption("Cost: ~10 tokens per seller storefront + 7 tokens per ASIN (exact FBA count). Products sold by Amazon are rejected.")
 unique_brand = st.checkbox("One product per brand overall (skip brands already found by any seller)", value=True)
-exact_fba = st.checkbox("Fetch exact FBA seller count (costs +6 extra tokens per ASIN; otherwise uses total offers when FBA is -2)", value=False)
-show_debug = st.checkbox("Show debug details (raw Keepa data & filter decisions)", value=True)
+exact_fba = st.checkbox("Fetch exact FBA seller count (recommended; uses offers=20, 7 tokens/ASIN)", value=True)
+show_debug = st.checkbox("Show debug details (raw Keepa data & filter decisions)", value=False)
+p1, p2, p3, p4, p5 = st.columns(5)
+max_asins = p1.number_input("Max ASINs per seller", 1, 500, 20)
+min_fba = p2.number_input("Min FBA sellers", 1, 100, 2)
+min_sales = p3.number_input("Min past-month sales", 0, 100000, 50)
+min_price = p4.number_input("Min price ($)", 0.0, 10000.0, 9.0)
+max_price = p5.number_input("Max price ($)", 0.0, 10000.0, 200.0)
 if qualified:
     seller_labels = {f"{r.get('seller_name') or r['seller_id']} ({r['seller_id']})": r["seller_id"] for r in qualified}
     chosen = st.multiselect("Select qualified US seller(s)", list(seller_labels),
                             default=list(seller_labels)[:1])
-    p1, p2, p3, p4, p5 = st.columns(5)
-    max_asins = p1.number_input("Max ASINs per seller", 1, 500, 20)
-    min_fba = p2.number_input("Min FBA sellers", 1, 100, 2)
-    min_sales = p3.number_input("Min past-month sales", 0, 100000, 50)
-    min_price = p4.number_input("Min price ($)", 0.0, 10000.0, 10.0)
-    max_price = p5.number_input("Max price ($)", 0.0, 10000.0, 200.0)
     if st.button("Fetch & filter seller products") and chosen:
         api = KeepaClient(cfg.api_key, cfg.domain)
         matched, checked, stopped = [], 0, None
         debug_storefronts, debug_rows = [], []
         try:
             left = api.token_status().get("tokensLeft", 0)
-            seen_brands = db.existing_brands() if unique_brand else set()
+            seen_brands = db.existing_brands(int(min_fba), int(min_sales), float(min_price), float(max_price)) if unique_brand else set()
             for label in chosen:
                 sid = seller_labels[label]
                 if left < 10:
@@ -264,7 +266,8 @@ if qualified:
 else:
     st.info("Qualify at least one US seller in steps 1–2 first.")
 
-products = db.product_rows(unique_brands=unique_brand)
+products = db.product_rows(unique_brands=unique_brand, min_fba=int(min_fba),
+                           min_sales=int(min_sales), min_price=float(min_price), max_price=float(max_price))
 if products:
     render_table(products, [
         ("Seller", "seller_name"), ("ASIN", "asin"), ("Brand Name", "brand"),
