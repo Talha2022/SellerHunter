@@ -6,3 +6,9 @@ CREATE TABLE IF NOT EXISTS sellers (
  discovered_at TEXT NOT NULL, enriched_at TEXT, verification_status TEXT DEFAULT 'pending',
  last_error TEXT, country TEXT
 );
+CREATE TABLE IF NOT EXISTS products (
+ seller_id TEXT NOT NULL, asin TEXT NOT NULL, brand TEXT, category TEXT,
+ monthly_sold INTEGER, fba_sellers INTEGER, price REAL,
+ sold_by_amazon INTEGER NOT NULL DEFAULT 0, fetched_at TEXT NOT NULL,
+ PRIMARY KEY (seller_id, asin)
+);

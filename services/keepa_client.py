@@ -42,3 +42,15 @@ class KeepaClient:
         if len(ids) > 100:
             raise ValueError("Seller Information batches must be at most 100 IDs.")
         return self.request("GET", "seller", params={"seller": ",".join(map(str, ids))})
+
+    def seller_storefront(self, seller_id):
+        # Storefront ASIN list requires a single seller ID and costs ~10 tokens when available
+        return self.request("GET", "seller", params={"seller": str(seller_id), "storefront": 1})
+
+    def products(self, asins, offers=None):
+        if len(asins) > 100:
+            raise ValueError("Product batches must be at most 100 ASINs.")
+        params = {"asin": ",".join(map(str, asins)), "stats": 1}
+        if offers:
+            params["offers"] = int(offers)
+        return self.request("GET", "product", params=params)

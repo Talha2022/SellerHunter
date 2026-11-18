@@ -70,3 +70,38 @@ class Database:
             pending = c.execute("SELECT COUNT(*) FROM sellers WHERE enriched_at IS NULL").fetchone()[0]
             non_us = c.execute("SELECT COUNT(*) FROM sellers WHERE enriched_at IS NOT NULL AND (country IS NULL OR country<>'US')").fetchone()[0]
             return {"discovered": total, "qualified": good, "pending": pending, "non_us": non_us}
+
+    def save_products(self, rows):
+        if not rows:
+            return
+        keys = ["seller_id", "asin", "brand", "category", "monthly_sold",
+                "fba_sellers", "price", "sold_by_amazon", "fetched_at"]
+        sql = f"INSERT OR REPLACE INTO products ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})"
+        with self.connect() as c:
+            c.executemany(sql, [[r.get(k) for k in keys] for r in rows])
+
+    def existing_brands(self):
+        with self.connect() as c:
+            rows = c.execute(
+                "SELECT DISTINCT LOWER(TRIM(brand)) AS b FROM products "
+                "WHERE sold_by_amazon = 0 AND brand IS NOT NULL AND TRIM(brand) <> ''"
+            ).fetchall()
+            return {r["b"] for r in rows}
+
+    def product_rows(self, unique_brands=True):
+        sql = ("SELECT p.*, s.seller_name FROM products p "
+               "LEFT JOIN sellers s ON s.seller_id = p.seller_id "
+               "WHERE p.sold_by_amazon = 0 ORDER BY p.fetched_at, p.seller_id, p.asin")
+        with self.connect() as c:
+            rows = [dict(r) for r in c.execute(sql).fetchall()]
+        if not unique_brands:
+            return rows
+        seen, kept = set(), []
+        for r in rows:
+            brand = (r.get("brand") or "").strip().lower()
+            if brand:
+                if brand in seen:
+                    continue
+                seen.add(brand)
+            kept.append(r)
+        return kept

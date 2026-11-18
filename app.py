@@ -1,10 +1,16 @@
 import html
+import importlib
 import streamlit as st
 from config import get_settings
 from database.db import Database
+import services.keepa_client as _keepa_client
+importlib.reload(_keepa_client)
 from services.keepa_client import KeepaClient
 from services.seller_discovery import discover, SORTS
 from services.seller_enrichment import normalize
+import services.product_filter as _product_filter
+importlib.reload(_product_filter)
+from services.product_filter import extract_product, filter_reason, dedupe_brands
 from exporters.excel_exporter import export
 from utils.logger import get_logger
 
@@ -114,32 +120,161 @@ qualified = db.rows()
 incomplete = db.rows(incomplete=True)
 st.metric("Verified US sellers with 0–49 feedback", len(qualified))
 st.caption("Only sellers whose Amazon business address is in the United States are listed.")
-if qualified:
+def render_table(rows, cols):
     # Plain HTML table: st.dataframe needs pyarrow, whose DLL is blocked by Windows Application Control here.
-    cols = [("Seller ID", "seller_id"), ("Seller Name", "seller_name"), ("Feedback", "lifetime_feedback"),
-            ("Business Name", "business_name"), ("Address", "business_address"), ("Country", "country"),
-            ("Phone", "phone_number"), ("Profile", "profile_url"), ("Status", "verification_status")]
     def cell(key, value):
         if value in (None, ""):
             return "<td>—</td>"
         text = html.escape(str(value))
         if key == "profile_url":
             return f'<td><a href="{text}" target="_blank">Open</a></td>'
+        if key == "asin":
+            return f'<td><a href="https://www.amazon.com/dp/{text}" target="_blank">{text}</a></td>'
         return f"<td>{text}</td>"
     head = "".join(f"<th>{label}</th>" for label, _ in cols)
-    body = "".join("<tr>" + "".join(cell(k, r.get(k)) for _, k in cols) + "</tr>" for r in qualified)
+    body = "".join("<tr>" + "".join(cell(k, r.get(k)) for _, k in cols) + "</tr>" for r in rows)
     st.markdown(
         "<style>.sellers{width:100%;border-collapse:collapse;font-size:14px}"
         ".sellers th,.sellers td{border:1px solid #444;padding:6px 8px;text-align:left;vertical-align:top}"
         ".sellers th{background:#1F4E78;color:#fff}</style>"
         f'<div style="overflow-x:auto"><table class="sellers"><tr>{head}</tr>{body}</table></div>',
         unsafe_allow_html=True)
+
+
+if qualified:
+    render_table(qualified, [
+        ("Seller ID", "seller_id"), ("Seller Name", "seller_name"), ("Feedback", "lifetime_feedback"),
+        ("Business Name", "business_name"), ("Address", "business_address"), ("Country", "country"),
+        ("Phone", "phone_number"), ("Profile", "profile_url"), ("Status", "verification_status"),
+    ])
 else:
     st.info("No verified qualifying sellers yet.")
 
-st.subheader("4. Excel export")
+st.subheader("4. Seller active listings & product filter")
+st.caption("Cost: ~10 tokens per seller storefront + 1 token per ASIN checked. Products sold by Amazon are rejected.")
+unique_brand = st.checkbox("One product per brand overall (skip brands already found by any seller)", value=True)
+exact_fba = st.checkbox("Fetch exact FBA seller count (costs +6 extra tokens per ASIN; otherwise uses total offers when FBA is -2)", value=False)
+show_debug = st.checkbox("Show debug details (raw Keepa data & filter decisions)", value=True)
+if qualified:
+    seller_labels = {f"{r.get('seller_name') or r['seller_id']} ({r['seller_id']})": r["seller_id"] for r in qualified}
+    chosen = st.multiselect("Select qualified US seller(s)", list(seller_labels),
+                            default=list(seller_labels)[:1])
+    p1, p2, p3, p4, p5 = st.columns(5)
+    max_asins = p1.number_input("Max ASINs per seller", 1, 500, 20)
+    min_fba = p2.number_input("Min FBA sellers", 1, 100, 2)
+    min_sales = p3.number_input("Min past-month sales", 0, 100000, 50)
+    min_price = p4.number_input("Min price ($)", 0.0, 10000.0, 10.0)
+    max_price = p5.number_input("Max price ($)", 0.0, 10000.0, 200.0)
+    if st.button("Fetch & filter seller products") and chosen:
+        api = KeepaClient(cfg.api_key, cfg.domain)
+        matched, checked, stopped = [], 0, None
+        debug_storefronts, debug_rows = [], []
+        try:
+            left = api.token_status().get("tokensLeft", 0)
+            seen_brands = db.existing_brands() if unique_brand else set()
+            for label in chosen:
+                sid = seller_labels[label]
+                if left < 10:
+                    stopped = f"Stopped before {sid}: only {left} tokens left (storefront needs 10)."
+                    break
+                sf = api.seller_storefront(sid)
+                left = sf.get("tokensLeft", left - 10)
+                seller_obj = (sf.get("sellers") or {}).get(sid) or {}
+                raw_asins = list(dict.fromkeys(seller_obj.get("asinList") or []))
+                asins = raw_asins[:int(max_asins)]
+                logger.info("Storefront %s: total asinList=%d, checking=%d, sample=%s",
+                            sid, len(raw_asins), len(asins), asins[:5])
+                debug_storefronts.append({
+                    "seller_id": sid,
+                    "total_asins_in_keepa": len(raw_asins),
+                    "asins_checked": len(asins),
+                    "asin_sample": ", ".join(asins[:10]) or "None",
+                })
+                seller_matches = []
+                for i in range(0, len(asins), 100):
+                    batch = asins[i:i + 100]
+                    cost_per_asin = 7 if exact_fba else 1
+                    if left < cost_per_asin:
+                        stopped = f"Stopped during {sid}: out of tokens ({left} left, needs {cost_per_asin}/ASIN)."
+                        break
+                    max_batch = left // cost_per_asin
+                    if len(batch) > max_batch:
+                        batch = batch[:max_batch]
+                    resp = api.products(batch, offers=20 if exact_fba else None)
+                    left = resp.get("tokensLeft", left - len(batch))
+                    checked += len(batch)
+                    for prod in resp.get("products") or []:
+                        row = extract_product(prod, sid)
+                        reason = filter_reason(row, int(min_fba), int(min_sales), float(min_price), float(max_price))
+                        if row["asin"] and reason is None:
+                            seller_matches.append(row)
+                            decision = "PASS"
+                        else:
+                            decision = reason or "Skipped: missing ASIN"
+                        row_dbg = dict(row)
+                        row_dbg["sold_by_amazon"] = "Yes" if row["sold_by_amazon"] else "No"
+                        row_dbg["availabilityAmazon"] = prod.get("availabilityAmazon")
+                        row_dbg["decision"] = decision
+                        debug_rows.append(row_dbg)
+                        logger.info("Product %s (%s): brand=%s fba=%s sales=%s price=%s amz=%s -> %s",
+                                    row["asin"], sid, row["brand"], row["fba_sellers"],
+                                    row["monthly_sold"], row["price"], row_dbg["sold_by_amazon"], decision)
+                    if len(batch) < len(asins[i:i + 100]):
+                        stopped = f"Stopped during {sid}: tokens ran low ({left} left)."
+                        break
+                if unique_brand:
+                    kept = dedupe_brands(seller_matches, seen_brands)
+                    kept_asins = {r["asin"] for r in kept}
+                    for r_dbg in debug_rows:
+                        if r_dbg["seller_id"] == sid and r_dbg["decision"] == "PASS" and r_dbg["asin"] not in kept_asins:
+                            r_dbg["decision"] = "Skipped: duplicate brand"
+                    seller_matches = kept
+                    seen_brands.update((r["brand"] or "").strip().lower() for r in seller_matches if r.get("brand"))
+                db.save_products(seller_matches)
+                matched.extend(seller_matches)
+                if stopped:
+                    break
+            st.success(f"Checked {checked} ASINs · saved {len(matched)} matching products · tokens left: {left}.")
+            if stopped:
+                st.warning(stopped)
+            if show_debug:
+                with st.expander("Debug: Storefront & Product Filter Details", expanded=True):
+                    if debug_storefronts:
+                        st.markdown("**Storefront responses**")
+                        render_table(debug_storefronts, [
+                            ("Seller ID", "seller_id"), ("Keepa asinList Total", "total_asins_in_keepa"),
+                            ("ASINs Checked", "asins_checked"), ("First 10 ASINs", "asin_sample"),
+                        ])
+                    if debug_rows:
+                        st.markdown("**Every checked ASIN & filter decision**")
+                        render_table(debug_rows, [
+                            ("Seller ID", "seller_id"), ("ASIN", "asin"), ("Brand", "brand"),
+                            ("Category", "category"), ("Sold by Amazon", "sold_by_amazon"),
+                            ("availAmz", "availabilityAmazon"), ("FBA Sellers", "fba_sellers"),
+                            ("Total Offers", "total_offers"), ("Monthly Sales", "monthly_sold"),
+                            ("Price ($)", "price"), ("Decision", "decision"),
+                        ])
+                    elif not debug_storefronts:
+                        st.info("No storefront data returned.")
+        except Exception as exc:
+            logger.exception("Product fetch failed")
+            st.error(str(exc))
+        finally:
+            api.close()
+else:
+    st.info("Qualify at least one US seller in steps 1–2 first.")
+
+products = db.product_rows(unique_brands=unique_brand)
+if products:
+    render_table(products, [
+        ("Seller", "seller_name"), ("ASIN", "asin"), ("Brand Name", "brand"),
+        ("Category", "category"), ("Past Month Sales", "monthly_sold"),
+        ("FBA Sellers", "fba_sellers"), ("Price ($)", "price"),
+    ])
+
+st.subheader("5. Excel export")
 if st.button("Generate Excel workbook"):
-    path = export(qualified, incomplete, db.counts(), cfg.export_dir)
+    path = export(qualified, incomplete, db.counts(), cfg.export_dir, products=products)
     with open(path, "rb") as file:
         st.download_button("Download Excel workbook", file, file_name=path.name,
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
